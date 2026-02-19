@@ -1,0 +1,33 @@
+name: Crypto Bot
+
+on:
+  workflow_dispatch:
+  schedule:
+    - cron: "*/5 * * * *"   # ⏱ Runs every 5 minutes
+
+concurrency:
+  group: crypto-bot
+  cancel-in-progress: true
+
+jobs:
+  run-bot:
+    runs-on: ubuntu-latest
+
+    env:
+      BOT_TOKEN: ${{ secrets.BOT_TOKEN }}
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      - name: Run bot
+        run: python main.py
+        
