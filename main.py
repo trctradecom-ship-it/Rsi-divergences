@@ -3,42 +3,65 @@ import numpy as np
 import pandas as pd
 import requests
 import os
-from datetime import datetime
+import json
+from datetime import datetime, timezone
 
-# -----------------------
-# TELEGRAM CONFIG
-# -----------------------
-TELEGRAM_TOKEN = "7213196077:AAE6OqSQuAnMYm7oiuaViYpwH0VqgilVPBI"
+# ===============================
+# 🤖 BOT SOURCE
+# ===============================
+BOT_SOURCE = "GitHub Actions"
+
+# ===============================
+# 🔐 TELEGRAM (SECURE)
+# ===============================
+TELEGRAM_TOKEN = os.getenv("BOT_TOKEN")
 CHAT_ID = "-1003734649641"
 
-def send_telegram(message):
-    """
-    Send Telegram message
-    """
-    url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage"
-    requests.get(url, params={"chat_id": CHAT_ID, "text": message})
-
-# -----------------------
-# EVENT TYPE DETECTION
-# -----------------------
-EVENT_NAME = os.getenv("EVENT_NAME", "schedule")  # GitHub passes this
-if EVENT_NAME == "workflow_dispatch":
-    # Only send this message on manual run
-    send_telegram("🚀 Crypto Divergence Bot started manually!")
-
-# -----------------------
-# EXCHANGE & PAIRS
-# -----------------------
+# ===============================
+# SETTINGS
+# ===============================
 symbols = ["BTC/USDT", "ETH/USDT", "BNB/USDT", "SOL/USDT"]
 timeframes = ["30m", "1h", "4h", "1d", "1w"]
 lookbacks = [3, 6]
 rsi_period = 14
 
+STATE_FILE = "divergence_state.json"
+
 exchange = ccxt.mexc({"enableRateLimit": True})
 
-# -----------------------
+# ===============================
+# LOAD / SAVE STATE
+# ===============================
+def load_state():
+    if not os.path.exists(STATE_FILE):
+        return {}
+    with open(STATE_FILE, "r") as f:
+        return json.load(f)
+
+def save_state(state):
+    with open(STATE_FILE, "w") as f:
+        json.dump(state, f, indent=4)
+
+# ===============================
+# TELEGRAM
+# ===============================
+def send_telegram(message):
+    if not TELEGRAM_TOKEN:
+        print("BOT_TOKEN not found!")
+        return
+
+    try:
+        url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage"
+        requests.post(url, data={
+            "chat_id": CHAT_ID,
+            "text": message
+        }, timeout=15)
+    except Exception as e:
+        print("Telegram Error:", e)
+
+# ===============================
 # RSI CALCULATION
-# -----------------------
+# ===============================
 def compute_rsi(prices, period=14):
     diff = np.diff(prices)
     gain = np.where(diff > 0, diff, 0)
@@ -49,85 +72,112 @@ def compute_rsi(prices, period=14):
     rsi = 100 - (100 / (1 + rs))
     return np.concatenate([np.full(period, np.nan), rsi[period:]])
 
-# -----------------------
-# FETCH OHLCV DATA
-# -----------------------
+# ===============================
+# FETCH DATA
+# ===============================
 def fetch_ohlcv(symbol, timeframe, limit=200):
     data = exchange.fetch_ohlcv(symbol, timeframe, limit=limit)
     df = pd.DataFrame(data, columns=["timestamp", "open", "high", "low", "close", "volume"])
     df["datetime"] = pd.to_datetime(df["timestamp"], unit="ms")
     return df
 
-# -----------------------
-# TRACK SENT SIGNALS TO AVOID DUPLICATES
-# -----------------------
-sent_signals = set()
-
-# -----------------------
+# ===============================
 # DIVERGENCE CHECK
-# -----------------------
-def check_divergence(df, lookback, symbol, timeframe):
+# ===============================
+def check_divergence(df, lookback, symbol, timeframe, state):
+
     signals = []
 
-    for i in range(lookback, len(df)):
-        price_now, price_prev = df.iloc[i]["close"], df.iloc[i-lookback]["close"]
-        rsi_now, rsi_prev = df.iloc[i]["rsi"], df.iloc[i-lookback]["rsi"]
+    for i in range(lookback, len(df)-1):
+
+        price_now = df.iloc[i]["close"]
+        price_prev = df.iloc[i-lookback]["close"]
+
+        rsi_now = df.iloc[i]["rsi"]
+        rsi_prev = df.iloc[i-lookback]["rsi"]
+
         dt = df.iloc[i]["datetime"]
+
+        if pd.isna(rsi_now) or pd.isna(rsi_prev):
+            continue
+
+        signal_type = None
 
         # Bullish Regular
         if price_now < price_prev and rsi_now > rsi_prev:
-            sig_id = f"{symbol}_{timeframe}_BR_{lookback}_{dt}"
-            if sig_id not in sent_signals:
-                signals.append(f"📈 Bullish Regular {symbol} {timeframe} at {dt} | Price: {price_now:.2f} | RSI: {rsi_now:.2f} | lookback:{lookback}")
-                sent_signals.add(sig_id)
+            signal_type = "Bullish Regular"
 
         # Bearish Regular
-        if price_now > price_prev and rsi_now < rsi_prev:
-            sig_id = f"{symbol}_{timeframe}_BEAR_{lookback}_{dt}"
-            if sig_id not in sent_signals:
-                signals.append(f"📉 Bearish Regular {symbol} {timeframe} at {dt} | Price: {price_now:.2f} | RSI: {rsi_now:.2f} | lookback:{lookback}")
-                sent_signals.add(sig_id)
+        elif price_now > price_prev and rsi_now < rsi_prev:
+            signal_type = "Bearish Regular"
 
         # Hidden Bullish
-        if price_now > price_prev and rsi_now < rsi_prev:
-            sig_id = f"{symbol}_{timeframe}_HIDDEN_BULL_{lookback}_{dt}"
-            if sig_id not in sent_signals:
-                signals.append(f"🔹 Hidden Bullish {symbol} {timeframe} at {dt} | Price: {price_now:.2f} | RSI: {rsi_now:.2f} | lookback:{lookback}")
-                sent_signals.add(sig_id)
+        elif price_now > price_prev and rsi_now < rsi_prev:
+            signal_type = "Hidden Bullish"
 
         # Hidden Bearish
-        if price_now < price_prev and rsi_now > rsi_prev:
-            sig_id = f"{symbol}_{timeframe}_HIDDEN_BEAR_{lookback}_{dt}"
-            if sig_id not in sent_signals:
-                signals.append(f"🔸 Hidden Bearish {symbol} {timeframe} at {dt} | Price: {price_now:.2f} | RSI: {rsi_now:.2f} | lookback:{lookback}")
-                sent_signals.add(sig_id)
+        elif price_now < price_prev and rsi_now > rsi_prev:
+            signal_type = "Hidden Bearish"
+
+        if not signal_type:
+            continue
+
+        key = f"{symbol}_{timeframe}_{signal_type}_{lookback}_{dt}"
+
+        if state.get(key):
+            continue
+
+        message = (
+            f"📊 RSI Divergence Signal\n\n"
+            f"🤖 Source: {BOT_SOURCE}\n\n"
+            f"📈 Type: {signal_type}\n"
+            f"📊 Pair: {symbol}\n"
+            f"⏱ TF: {timeframe}\n"
+            f"🔍 Lookback: {lookback}\n"
+            f"💰 Price: {price_now:.2f}\n"
+            f"📉 RSI: {rsi_now:.2f}\n"
+            f"🕒 UTC: {datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M:%S')}"
+        )
+
+        signals.append((key, message))
 
     return signals
 
-# -----------------------
-# MAIN LOOP
-# -----------------------
+# ===============================
+# MAIN
+# ===============================
 def main():
+
+    state = load_state()
+
+    # Manual start message only
+    if os.getenv("GITHUB_EVENT_NAME") == "workflow_dispatch":
+        send_telegram(
+            "🚀 RSI Divergence Bot Started\n\n"
+            f"🤖 Source: {BOT_SOURCE}\n"
+            f"🕒 UTC: {datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M:%S')}"
+        )
+
     for symbol in symbols:
         for timeframe in timeframes:
+
             try:
                 df = fetch_ohlcv(symbol, timeframe)
                 df["rsi"] = compute_rsi(df["close"].values, rsi_period)
 
-                all_signals = []
-
                 for lb in lookbacks:
-                    signals = check_divergence(df, lb, symbol, timeframe)
-                    all_signals.extend(signals)
+                    signals = check_divergence(df, lb, symbol, timeframe, state)
 
-                # Send all signals
-                for msg in all_signals:
-                    print(msg)
-                    send_telegram(msg)
+                    for key, msg in signals:
+                        print(msg)
+                        send_telegram(msg)
+                        state[key] = True
 
             except Exception as e:
-                print(f"⚠ Error fetching {symbol} {timeframe}: {e}")
+                print(f"Error {symbol} {timeframe}: {e}")
+
+    save_state(state)
 
 if __name__ == "__main__":
     main()
-  
+    
