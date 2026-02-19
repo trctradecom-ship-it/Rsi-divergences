@@ -13,8 +13,11 @@ BOT_TOKEN = os.getenv("BOT_TOKEN")
 CHAT_ID = "-1003734649641"
 
 def send_telegram(message):
-    url = f"https://api.telegram.org/bot{BOT_TOKEN}/sendMessage"
-    requests.get(url, params={"chat_id": CHAT_ID, "text": message})
+    try:
+        url = f"https://api.telegram.org/bot{BOT_TOKEN}/sendMessage"
+        requests.get(url, params={"chat_id": CHAT_ID, "text": message})
+    except:
+        pass
 
 
 # =====================================================
@@ -24,11 +27,11 @@ def send_telegram(message):
 EVENT_NAME = os.getenv("GITHUB_EVENT_NAME", "")
 
 if EVENT_NAME == "workflow_dispatch":
-    send_telegram("🚀 Powerful RSI Pivot Divergence Bot Started")
+    send_telegram("🚀 RSI Pivot Divergence Bot Started")
 
 
 # =====================================================
-# SETTINGS (Match Pine Script)
+# SETTINGS (Match TradingView Script)
 # =====================================================
 
 symbols = ["BTC/USDT", "ETH/USDT", "BNB/USDT", "SOL/USDT"]
@@ -58,11 +61,11 @@ def save_state():
 
 
 # =====================================================
-# RSI
+# RSI FUNCTION
 # =====================================================
 
-def compute_rsi(prices, period=14):
-    delta = prices.diff()
+def compute_rsi(series, period=14):
+    delta = series.diff()
     gain = delta.clip(lower=0)
     loss = -delta.clip(upper=0)
 
@@ -74,16 +77,25 @@ def compute_rsi(prices, period=14):
 
 
 # =====================================================
-# PIVOT DETECTION (Like ta.pivotlow / pivothigh)
+# TRUE PIVOT DETECTION (LEFT & RIGHT CONFIRMATION)
 # =====================================================
 
-def pivot_low(series, left, right):
-    return series[(series.shift(left) > series) & 
-                  (series.shift(-right) > series)]
+def detect_pivots(series, left=3, right=3):
 
-def pivot_high(series, left, right):
-    return series[(series.shift(left) < series) & 
-                  (series.shift(-right) < series)]
+    pivots_low = []
+    pivots_high = []
+
+    for i in range(left, len(series) - right):
+
+        window = series[i-left:i+right+1]
+
+        if series[i] == window.min():
+            pivots_low.append(i)
+
+        if series[i] == window.max():
+            pivots_high.append(i)
+
+    return pivots_low, pivots_high
 
 
 # =====================================================
@@ -98,7 +110,7 @@ def fetch_ohlcv(symbol, timeframe, limit=300):
 
 
 # =====================================================
-# DIVERGENCE LOGIC (True Pivot Based)
+# DIVERGENCE ENGINE (STRICT VERSION)
 # =====================================================
 
 def check_divergence(df, symbol, timeframe):
@@ -107,65 +119,73 @@ def check_divergence(df, symbol, timeframe):
 
     df["rsi"] = compute_rsi(df["close"], rsi_len)
 
-    # Find pivot lows/highs on RSI
-    rsi_lows = pivot_low(df["rsi"], pivot_len, pivot_len)
-    rsi_highs = pivot_high(df["rsi"], pivot_len, pivot_len)
+    rsi_series = df["rsi"]
 
-    # Get last two pivot lows
-    last_two_lows = rsi_lows.dropna().tail(2)
-    last_two_highs = rsi_highs.dropna().tail(2)
+    pivots_low, pivots_high = detect_pivots(rsi_series, pivot_len, pivot_len)
 
-    # -------------------------------
-    # CLASSIC BULLISH
-    # -------------------------------
-    if len(last_two_lows) == 2:
+    # =========================
+    # BULLISH CLASSIC
+    # =========================
+    if len(pivots_low) >= 2:
 
-        prev_idx, last_idx = last_two_lows.index[0], last_two_lows.index[1]
+        prev_idx = pivots_low[-2]
+        last_idx = pivots_low[-1]
 
-        if last_idx - prev_idx <= lookback_limit:
+        # Only check if latest pivot confirmed recently
+        if last_idx >= len(df) - pivot_len - 1:
 
-            prev_price = df.loc[prev_idx, "low"]
-            last_price = df.loc[last_idx, "low"]
+            if last_idx - prev_idx <= lookback_limit:
 
-            prev_rsi = df.loc[prev_idx, "rsi"]
-            last_rsi = df.loc[last_idx, "rsi"]
+                prev_price = df.loc[prev_idx, "low"]
+                last_price = df.loc[last_idx, "low"]
 
-            if prev_price > last_price and prev_rsi < last_rsi:
+                prev_rsi = df.loc[prev_idx, "rsi"]
+                last_rsi = df.loc[last_idx, "rsi"]
 
-                key = f"{symbol}_{timeframe}_{last_idx}_BULL"
+                if prev_price > last_price and prev_rsi < last_rsi:
 
-                if key not in sent_signals:
-                    signals.append(
-                        f"📈 Bullish Classic Divergence\n"
-                        f"{symbol} | {timeframe}"
-                    )
-                    sent_signals[key] = True
+                    key = f"{symbol}_{timeframe}_{last_idx}_BULL"
 
-    # -------------------------------
-    # CLASSIC BEARISH
-    # -------------------------------
-    if len(last_two_highs) == 2:
+                    if key not in sent_signals:
+                        signals.append(
+                            f"📈 Bullish Classic Divergence\n"
+                            f"{symbol} | {timeframe}"
+                        )
+                        sent_signals[key] = True
 
-        prev_idx, last_idx = last_two_highs.index[0], last_two_highs.index[1]
+                    return signals   # prevent opposite signal
 
-        if last_idx - prev_idx <= lookback_limit:
 
-            prev_price = df.loc[prev_idx, "high"]
-            last_price = df.loc[last_idx, "high"]
+    # =========================
+    # BEARISH CLASSIC
+    # =========================
+    if len(pivots_high) >= 2:
 
-            prev_rsi = df.loc[prev_idx, "rsi"]
-            last_rsi = df.loc[last_idx, "rsi"]
+        prev_idx = pivots_high[-2]
+        last_idx = pivots_high[-1]
 
-            if prev_price < last_price and prev_rsi > last_rsi:
+        if last_idx >= len(df) - pivot_len - 1:
 
-                key = f"{symbol}_{timeframe}_{last_idx}_BEAR"
+            if last_idx - prev_idx <= lookback_limit:
 
-                if key not in sent_signals:
-                    signals.append(
-                        f"📉 Bearish Classic Divergence\n"
-                        f"{symbol} | {timeframe}"
-                    )
-                    sent_signals[key] = True
+                prev_price = df.loc[prev_idx, "high"]
+                last_price = df.loc[last_idx, "high"]
+
+                prev_rsi = df.loc[prev_idx, "rsi"]
+                last_rsi = df.loc[last_idx, "rsi"]
+
+                if prev_price < last_price and prev_rsi > last_rsi:
+
+                    key = f"{symbol}_{timeframe}_{last_idx}_BEAR"
+
+                    if key not in sent_signals:
+                        signals.append(
+                            f"📉 Bearish Classic Divergence\n"
+                            f"{symbol} | {timeframe}"
+                        )
+                        sent_signals[key] = True
+
+                    return signals
 
     return signals
 
