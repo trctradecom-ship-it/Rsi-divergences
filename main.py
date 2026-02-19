@@ -1,10 +1,8 @@
 import ccxt
-import numpy as np
 import pandas as pd
 import requests
 import os
 import json
-from datetime import datetime
 
 # =====================================================
 # TELEGRAM CONFIG
@@ -14,15 +12,12 @@ BOT_TOKEN = os.getenv("BOT_TOKEN")
 CHAT_ID = "-1003734649641"
 
 def send_telegram(message):
-    """
-    Send message to Telegram
-    """
     url = f"https://api.telegram.org/bot{BOT_TOKEN}/sendMessage"
     requests.get(url, params={"chat_id": CHAT_ID, "text": message})
 
 
 # =====================================================
-# EVENT TYPE DETECTION (Manual vs Schedule)
+# EVENT DETECTION (Manual vs Schedule)
 # =====================================================
 
 EVENT_NAME = os.getenv("GITHUB_EVENT_NAME", "")
@@ -32,7 +27,7 @@ if EVENT_NAME == "workflow_dispatch":
 
 
 # =====================================================
-# EXCHANGE & SETTINGS
+# SETTINGS
 # =====================================================
 
 symbols = ["BTC/USDT", "ETH/USDT", "BNB/USDT", "SOL/USDT"]
@@ -45,7 +40,7 @@ exchange = ccxt.mexc({"enableRateLimit": True})
 
 
 # =====================================================
-# LOAD & SAVE STATE (Avoid Duplicate Signals)
+# LOAD / SAVE STATE (Prevent Duplicate Alerts)
 # =====================================================
 
 if os.path.exists(state_file):
@@ -64,9 +59,6 @@ def save_state():
 # =====================================================
 
 def compute_rsi(prices, period=14):
-    """
-    Calculate RSI using rolling averages
-    """
     delta = pd.Series(prices).diff()
 
     gain = delta.clip(lower=0)
@@ -82,7 +74,7 @@ def compute_rsi(prices, period=14):
 
 
 # =====================================================
-# FETCH MARKET DATA
+# FETCH DATA
 # =====================================================
 
 def fetch_ohlcv(symbol, timeframe, limit=200):
@@ -98,16 +90,15 @@ def fetch_ohlcv(symbol, timeframe, limit=200):
 
 
 # =====================================================
-# DIVERGENCE LOGIC (Latest Candle Only)
+# DIVERGENCE CHECK (Latest Candle Only)
 # =====================================================
 
 def check_divergence(df, symbol, timeframe):
 
     signals = []
+    i = len(df) - 1
 
     for lb in lookbacks:
-
-        i = len(df) - 1
 
         price_now = df.iloc[i]["close"]
         price_prev = df.iloc[i - lb]["close"]
@@ -121,11 +112,11 @@ def check_divergence(df, symbol, timeframe):
         dt = str(df.iloc[i]["datetime"])
         base_key = f"{symbol}_{timeframe}_{lb}_{dt}"
 
-        # -------------------------------------------------
-        # 1️⃣ Bullish Regular
+        # -------------------------------
+        # Bullish Regular
         # Price: Lower Low
         # RSI: Higher Low
-        # -------------------------------------------------
+        # -------------------------------
         if price_now < price_prev and rsi_now > rsi_prev:
             key = base_key + "_BR"
             if key not in sent_signals:
@@ -137,12 +128,12 @@ def check_divergence(df, symbol, timeframe):
                 )
                 sent_signals[key] = True
 
-        # -------------------------------------------------
-        # 2️⃣ Bearish Regular
+        # -------------------------------
+        # Bearish Regular
         # Price: Higher High
         # RSI: Lower High
-        # -------------------------------------------------
-        if price_now > price_prev and rsi_now < rsi_prev:
+        # -------------------------------
+        elif price_now > price_prev and rsi_now < rsi_prev:
             key = base_key + "_BEAR"
             if key not in sent_signals:
                 signals.append(
@@ -153,46 +144,16 @@ def check_divergence(df, symbol, timeframe):
                 )
                 sent_signals[key] = True
 
-        # -------------------------------------------------
-        # 3️⃣ Hidden Bullish
-        # Price: Higher Low
-        # RSI: Lower Low
-        # -------------------------------------------------
-        if price_now > price_prev and rsi_now < rsi_prev:
-            key = base_key + "_HBULL"
-            if key not in sent_signals:
-                signals.append(
-                    f"🔹 Hidden Bullish\n"
-                    f"Symbol: {symbol}\n"
-                    f"Timeframe: {timeframe}\n"
-                    f"Lookback: {lb}"
-                )
-                sent_signals[key] = True
-
-        # -------------------------------------------------
-        # 4️⃣ Hidden Bearish
-        # Price: Lower High
-        # RSI: Higher High
-        # -------------------------------------------------
-        if price_now < price_prev and rsi_now > rsi_prev:
-            key = base_key + "_HBEAR"
-            if key not in sent_signals:
-                signals.append(
-                    f"🔸 Hidden Bearish\n"
-                    f"Symbol: {symbol}\n"
-                    f"Timeframe: {timeframe}\n"
-                    f"Lookback: {lb}"
-                )
-                sent_signals[key] = True
-
     return signals
 
 
 # =====================================================
-# MAIN EXECUTION
+# MAIN
 # =====================================================
 
 def main():
+
+    all_signals = []
 
     for symbol in symbols:
         for timeframe in timeframes:
@@ -200,14 +161,23 @@ def main():
                 df = fetch_ohlcv(symbol, timeframe)
                 df["rsi"] = compute_rsi(df["close"], rsi_period)
 
-                detected_signals = check_divergence(df, symbol, timeframe)
-
-                for message in detected_signals:
-                    print(message)
-                    send_telegram(message)
+                detected = check_divergence(df, symbol, timeframe)
+                all_signals.extend(detected)
 
             except Exception as e:
                 print(f"⚠ Error {symbol} {timeframe}: {e}")
+
+    # ----------------------------------------
+    # SEND ONE CLEAN MESSAGE (No Spam)
+    # ----------------------------------------
+
+    if all_signals:
+
+        message = "📊 RSI Divergence Signals\n"
+        message += "━━━━━━━━━━━━━━\n\n"
+        message += "\n\n".join(all_signals)
+
+        send_telegram(message)
 
     save_state()
 
